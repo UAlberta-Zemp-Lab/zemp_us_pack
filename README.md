@@ -3,7 +3,7 @@
 This provides a reference implementation of the Zemp US Pack
 format used for bundling multiple frames of image data together
 into a compressed format. The format description can be found in
-`zemp_us_pack.c`.
+`zemp_us_pack.h`.
 
 The files are mostly self contained only requiring the final
 binary be linked with [libzstd][]. On their own they don't even
@@ -13,11 +13,12 @@ The suggested way to include in your application is to statically
 link with your main application:
 
 ```c
+#define ZUS_IMPLEMENTATION
 #define ZUS_PACK_STATIC
-#include "zemp_us_pack.c"
+#include "zemp_us_pack.h"
 ```
 
-However `zemp_us_pack.h` is provided if you prefer to build as a
+However `#define ZUS_STATIC` can be dropped if you prefer to build as a
 dynamic library and link with your application.
 
 The following sections give example usage.
@@ -25,10 +26,10 @@ The following sections give example usage.
 ### Packing
 
 To pack a series of image frames into a pack file start by
-allocating a `ZUSPStream` structure and filling it in:
+allocating a `ZUSStream` structure and filling it in:
 
 ```c
-ZUSPStream zus = {
+ZUSStream zus = {
 	.flush    = flush_function,
 	.ctx      = ctx,
 	.buffer   = data_buffer,
@@ -36,24 +37,33 @@ ZUSPStream zus = {
 };
 ```
 
-Then pass it along with the a `ZUSMetadata`, a
-`BeamformerParameters`, and one or more frames of image data to
-`zus_pack()`:
+Next fill out a `ZUSHeader`:
 
 ```c
-ZUSMetadata metadata = {
-	.unix_timestamp    = creation_time_in_secs,
+ZUSHeader header = {
+	.unix_timestamp    = data_creation_time_in_secs,
 	.array_id          = array_id,
 	.phantom_id        = phantom_id,
 	.imaging_method_id = imaging_method_id,
+	.user_data_tag     = user_data_tag,
+	.user_data_size    = user_data_size,
+	.user_data         = user_data_ptr,
 };
-i32 status = zus_pack(&zus, &metadata, beamformer_params_ptr, image_data_ptr,
-                      image_data_size_in_bytes, frame_count);
+```
+
+The user data size must be specified ahead of time and cannot be
+modified after the fact.
+
+Then pass the `ZUSStream` and `ZUSHeader` with a frame of image
+data to `zus_push_frame()`:
+
+```c
+i32 status = zus_push_frame(&zus, &header, raw_data_ptr, raw_data_size_in_bytes);
 ```
 
 Note that the function is re-entrant and you can keep calling it
 with new image frames if you don't want to preload them all at
-once.
+once. You must specify the size of the user data upfront and
 
 The minimum amount of space required for the `buffer` member can
 be queried as follows:
@@ -72,35 +82,39 @@ buffer when it is full. One possible example using libc stdio is
 as follows:
 
 ```c
-b32 my_flush_function(u8 *bytes, size number_of_bytes, void *ctx)
+b32 my_flush_function(u8 *bytes, size number_of_bytes, size offset, void *ctx)
 {
 	FILE *f      = (FILE *)ctx;
+	b32 result   = fseeko(f, offset, SEEK_SET) == 0;
 	size written = fwrite(bytes, 1, number_of_bytes, f);
-	return written == number_of_bytes;
+	return result && (written == number_of_bytes);
 }
 ...
 
 FILE *output = fopen("packed_data.zus", "w");
-zus.flush    = my_flush_fuunction;
+zus.flush    = my_flush_function;
 zus.ctx      = output;
 ```
 
-If your function returns `0` `zus_pack()` will return with
-`ZUS_BUFFER_FLUSH_FAILURE` and you will be required to fix the
-issue before calling `zus_pack()` again. Do not expect
-`zus_pack()` to give correct results if, after fixing the problem,
-you call it with a different data pointer.
+If your function returns `0` `zus_push_frame()` will return with
+`ZUS_ERR_BUFFER_FLUSH_FAILURE` and you will be required to fix the
+issue before calling `zus_push_frame()` again. Do not expect
+`zus_push_frame()` to give correct results if, after fixing the
+problem, you call it with a different data pointer.
 
 Finally once you are done sending image frames finalize the stream:
 
 ```c
-zus_finish_pack(&zus);
+zus_pack_finish(&zus, &header);
 ```
 
 After which you may discard your output buffer and finalize your
 own output location.
 
 ### Unpacking
+
+TODO: This needs to be updated. For instance this format no longer
+cares about the userdata format.
 
 To unpack a pack file start by reading the header into memory and
 passing it to `zus_unpack_header()`:
